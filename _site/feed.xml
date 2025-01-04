@@ -1,5 +1,107 @@
-<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.3.4">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2025-01-03T20:05:01-07:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">Jean Barkhuysen</title><subtitle>SWE at Netflix working on distributed media processing/storage. Former Googler working on distributed storage. Former surname de Klerk.
-This is my personal website. The views represented here are my own, and do not represent my employer.</subtitle><entry><title type="html">Goodbye Google, Hiya Netflix</title><link href="http://localhost:4000/2025/01/02/goodbye-google.html" rel="alternate" type="text/html" title="Goodbye Google, Hiya Netflix" /><published>2025-01-02T00:55:23-07:00</published><updated>2025-01-02T00:55:23-07:00</updated><id>http://localhost:4000/2025/01/02/goodbye-google</id><content type="html" xml:base="http://localhost:4000/2025/01/02/goodbye-google.html"><![CDATA[<h1 id="a-goodbye-to-google">A goodbye to Google</h1>
+<?xml version="1.0" encoding="utf-8"?><feed xmlns="http://www.w3.org/2005/Atom" ><generator uri="https://jekyllrb.com/" version="4.3.4">Jekyll</generator><link href="http://localhost:4000/feed.xml" rel="self" type="application/atom+xml" /><link href="http://localhost:4000/" rel="alternate" type="text/html" /><updated>2025-01-04T07:48:51-07:00</updated><id>http://localhost:4000/feed.xml</id><title type="html">Jean Barkhuysen</title><subtitle>SWE at Netflix working on distributed media processing/storage. Former Googler working on distributed storage. Former surname de Klerk.
+This is my personal website. The views represented here are my own, and do not represent my employer.</subtitle><entry><title type="html">Running your own pkgsite, pt1</title><link href="http://localhost:4000/2025/01/03/pkgsite-pt1.html" rel="alternate" type="text/html" title="Running your own pkgsite, pt1" /><published>2025-01-03T00:55:23-07:00</published><updated>2025-01-03T00:55:23-07:00</updated><id>http://localhost:4000/2025/01/03/pkgsite-pt1</id><content type="html" xml:base="http://localhost:4000/2025/01/03/pkgsite-pt1.html"><![CDATA[<h2 id="who-this-is-for">Who this is for</h2>
+
+<p>I’ve recently joined Netflix, and I’m doing a bit of Go. Go is not one of the
+main languages at Netflix, so it lacks a dedicated team supporting it, and lacks
+some common tooling.</p>
+
+<p>I’ve been particularly missing
+<a href="https://pkg.go.dev/golang.org/x/pkgsite">x/pkgsite</a> - the documentation server
+behind <a href="https://pkg.go.dev/">pkg.go.dev</a>.</p>
+
+<p>Netflix has a private enterprise GitHub repository and a corresponding private
+<a href="https://go.dev/ref/mod#module-proxy">module proxy</a>, so the public pkgsite
+doesn’t index it. So, I set out to figure out how to run my own instance of
+pkgsite against this private repo &amp; module proxy.</p>
+
+<p>Though pkgsite is open source, there’s no documentation for running it yourself
+(probably for good reasons). So, this article is for anyone who wants to do
+something similar.</p>
+
+<h2 id="components">Components</h2>
+
+<p>First of all, pkgsite is canonically hosted at https://go.googlesource.com/pkgsite
+and can be cloned with <code class="language-plaintext highlighter-rouge">git clone https://go.googlesource.com/pkgsite</code>.</p>
+
+<p>Let’s look at the important components that we’re going to be dealing with.
+Here’s a selective look with <code class="language-plaintext highlighter-rouge">tree</code>:</p>
+
+<div class="language-sh highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nv">$ </span>tree
+<span class="nb">.</span>
+|____cmd
+| |____frontend
+| | |____main.go
+| |____pkgsite
+| | |____main.go
+| |____worker
+| | |____main.go
+|____migrations
+| |____000073_create_documentation_symbols.down.sql
+| |____000018_add_module_version_states_status_index.up.sql
+| |____...etc...
+|____devtools
+| |____cmd
+| | |____seeddb
+| | | |____seed.txt
+| | | |____main.go
+</code></pre></div></div>
+
+<p>So, the main programs we’ll run are the frontend, worker, seeddb, and
+cmd/pkgsite - the latter of which I’ll refer to as such to disambiguate with
+pkgsite, the overall project. The migrations directory hold all the .sql files
+needed to set up a postgres database that other components deal with.</p>
+
+<p>Let’s quickly describe each:</p>
+
+<ul>
+  <li><strong>cmd/pkgsite</strong>: The simplest and best documented. Running this lets you host
+a minimal pkgsite. It’s not connected to a database and doesn’t have a worker
+searching for modules. So, it doesn’t have a usable search feature. It’s useful
+for looking at one or two of your own projects but without search, it’s not good
+enough for an entire org.</li>
+  <li><strong>frontend</strong>: The web-serving frontend. When run, serves the frontend at
+<code class="language-plaintext highlighter-rouge">localhost:8080</code>.</li>
+  <li><strong>worker</strong>: The data-fetching backend that updates the database. When run,
+serves a work management page at <code class="language-plaintext highlighter-rouge">localhost:8000</code>.</li>
+  <li><strong>migrations</strong>: A series of sql scripts that when run in order will set up
+all the necessary tables and schemas.</li>
+  <li><strong>seeddb</strong>: A one-shot program that reads a <code class="language-plaintext highlighter-rouge">seed.txt</code> file, fetches modules
+listed there-in, and populates the database with the information.</li>
+</ul>
+
+<h2 id="modifiable-config">Modifiable config</h2>
+
+<p>The frontend and worker both use <code class="language-plaintext highlighter-rouge">internal/config/serverconfig/config.go</code>, which
+is modifiable with environment variables. Let’s look at a subset of important
+environment variables that you may want to change when running these programs:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code># Proxy config.
+ProxyURL:   GetEnv("GO_MODULE_PROXY_URL", "https://proxy.golang.org"),
+
+# Database config.
+DBHost:               chooseOne(GetEnv("GO_DISCOVERY_DATABASE_HOST", "localhost")),
+DBUser:               GetEnv("GO_DISCOVERY_DATABASE_USER", "postgres"),
+DBPassword:           os.Getenv("GO_DISCOVERY_DATABASE_PASSWORD"),
+DBSecondaryHost:      chooseOne(os.Getenv("GO_DISCOVERY_DATABASE_SECONDARY_HOST")),
+DBPort:               GetEnv("GO_DISCOVERY_DATABASE_PORT", "5432"),
+DBName:               GetEnv("GO_DISCOVERY_DATABASE_NAME", "discovery-db"),
+</code></pre></div></div>
+
+<p>The proxy URL in particular we’ll need to change, since the point of this
+project is to run against our own private module proxy. We’ll get into that a
+bit later on, but for now just know these exist.</p>
+
+<h2 id="running-a-simple-pkgsite">Running a simple pkgsite</h2>
+
+<p>To wrap up this post, let’s quickly look at how to run a simple pkgsite:</p>
+
+<h2 id="next-up">Next up</h2>
+
+<p>In a next post, we’ll look at how to set up your postgres database and how to
+seed it with seeddb.</p>
+
+<p>After that, we’ll finally take a look at how to run worker and frontend in order
+to serve your own pkgsite.</p>]]></content><author><name></name></author><summary type="html"><![CDATA[Who this is for]]></summary></entry><entry><title type="html">Goodbye Google, Hiya Netflix</title><link href="http://localhost:4000/2025/01/02/goodbye-google.html" rel="alternate" type="text/html" title="Goodbye Google, Hiya Netflix" /><published>2025-01-02T00:55:23-07:00</published><updated>2025-01-02T00:55:23-07:00</updated><id>http://localhost:4000/2025/01/02/goodbye-google</id><content type="html" xml:base="http://localhost:4000/2025/01/02/goodbye-google.html"><![CDATA[<h1 id="a-goodbye-to-google">A goodbye to Google</h1>
 
 <p>I left Google last month, after almost 7 years to the day.</p>
 
@@ -957,333 +1059,4 @@ func Decompress(name, path string) error {
 
 <p>I’m still very happy here; I’m learning and growing my technical skills a lot; and I’m having fun. And sometimes unintentionally breaking things, but then fixing them very quickly afterwards.</p>
 
-<p>I had hoped that I would be able to stick on the technical path through my whole career, growing and reaching new levels without having to dip into management. After 4 years at Google, 10 years working professionally, and 16 years programming, I’m very pleased to say that I still have that hope, am still enjoying learning, and doing so voraciously, and am still finding new levels of technical depth. I am overwhelmingly optimistic about continuing on this path. 🙂</p>]]></content><author><name></name></author><summary type="html"><![CDATA[Reflecting on 4 years at Google]]></summary></entry><entry><title type="html">Contexts and Structs</title><link href="http://localhost:4000/2021/02/24/contexts-structs.html" rel="alternate" type="text/html" title="Contexts and Structs" /><published>2021-02-24T14:55:23-07:00</published><updated>2021-02-24T14:55:23-07:00</updated><id>http://localhost:4000/2021/02/24/contexts-structs</id><content type="html" xml:base="http://localhost:4000/2021/02/24/contexts-structs.html"><![CDATA[<p>Posted at <a href="https://go.dev/blog/context-and-structs">go.dev/blog/context-and-structs</a>.</p>]]></content><author><name></name></author><summary type="html"><![CDATA[Posted at go.dev/blog/context-and-structs.]]></summary></entry><entry><title type="html">Stubbing gRPC in Go</title><link href="http://localhost:4000/2020/10/08/stubbing-grpc.html" rel="alternate" type="text/html" title="Stubbing gRPC in Go" /><published>2020-10-08T15:55:23-06:00</published><updated>2020-10-08T15:55:23-06:00</updated><id>http://localhost:4000/2020/10/08/stubbing-grpc</id><content type="html" xml:base="http://localhost:4000/2020/10/08/stubbing-grpc.html"><![CDATA[<h1 id="introduction">Introduction</h1>
-
-<p>I’ve several times been met with the question, “How do you stub gRPC in Go”?</p>
-
-<p>This is a short blog post about how to do that.</p>
-
-<h1 id="mocking">Mocking</h1>
-
-<p>Mocking gRPC clients is <em>super easy</em> and doesn’t require a separate mocking
-library. Given some proto with service,</p>
-
-<div class="language-proto highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="kd">service</span> <span class="n">Greeter</span> <span class="p">{</span>
-    <span class="k">rpc</span> <span class="n">SayHello</span> <span class="p">(</span><span class="n">HelloRequest</span><span class="p">)</span> <span class="k">returns</span> <span class="p">(</span><span class="n">HelloReply</span><span class="p">)</span> <span class="p">{}</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>This will generate a <code class="language-plaintext highlighter-rouge">greeter.pb.go</code> with,</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">type</span> <span class="n">GreeterClient</span> <span class="k">interface</span> <span class="p">{</span>
-    <span class="n">SayHello</span><span class="p">(</span><span class="n">ctx</span> <span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="n">in</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="n">opts</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>That interface is all we need to mock away. Our code that communicates with
-<code class="language-plaintext highlighter-rouge">Greeter</code> will take the <code class="language-plaintext highlighter-rouge">GreeterClient</code> interface, per usual dependency
-injection. In our real code (<code class="language-plaintext highlighter-rouge">main.go</code>, etc) we’ll give it a real client,
-and our tests we’ll give it a fake client:</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c">// Code that uses GreeterClient</span>
-
-<span class="k">type</span> <span class="n">SomeService</span> <span class="k">struct</span> <span class="p">{</span>
-    <span class="n">gc</span> <span class="o">*</span><span class="n">greeter</span><span class="o">.</span><span class="n">GreeterClient</span>
-<span class="p">}</span>
-<span class="c">// Inject me with either a real GreeterClient or a fake one!</span>
-<span class="k">func</span> <span class="n">NewSomeService</span><span class="p">(</span><span class="n">gc</span> <span class="o">*</span><span class="n">greeter</span><span class="o">.</span><span class="n">GreeterClient</span><span class="p">)</span> <span class="o">*</span><span class="n">SomeService</span> <span class="p">{</span>
-    <span class="k">return</span> <span class="o">&amp;</span><span class="n">SomeService</span><span class="p">{</span><span class="n">gc</span><span class="o">:</span> <span class="n">gc</span><span class="p">}</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>Here’s our real code:</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">var</span> <span class="n">greeterAddr</span> <span class="o">=</span> <span class="n">flag</span><span class="o">.</span><span class="n">String</span><span class="p">(</span><span class="s">"greeterAddr"</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="s">"--greeterAddr=greeter:12345"</span><span class="p">)</span>
-
-<span class="k">func</span> <span class="n">main</span><span class="p">()</span> <span class="p">{</span>
-    <span class="n">flag</span><span class="o">.</span><span class="n">Parse</span><span class="p">()</span>
-    <span class="n">conn</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">grpc</span><span class="o">.</span><span class="n">Dial</span><span class="p">(</span><span class="o">*</span><span class="n">GreeterAddr</span><span class="p">)</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="c">// Handle err.</span>
-    <span class="p">}</span>
-    <span class="k">defer</span> <span class="n">conn</span><span class="o">.</span><span class="n">Close</span><span class="p">()</span>
-    <span class="n">gc</span> <span class="o">:=</span> <span class="n">greeter</span><span class="o">.</span><span class="n">NewGreeterClient</span><span class="p">(</span><span class="n">conn</span><span class="p">)</span>
-    <span class="n">serv</span> <span class="o">:=</span> <span class="n">someservice</span><span class="o">.</span><span class="n">NewSomeService</span><span class="p">(</span><span class="n">gc</span><span class="p">)</span>
-    <span class="n">_</span> <span class="o">=</span> <span class="n">serv</span> <span class="c">// Use SomeService with real GreeterClient.</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>And, here’s our test version using a fake GreeterClient for testing:</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">type</span> <span class="n">fakeGreeterClient</span> <span class="k">struct</span> <span class="p">{</span>
-    <span class="n">sayHelloFn</span> <span class="k">func</span><span class="p">(</span><span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span>
-<span class="p">}</span>
-
-<span class="k">func</span> <span class="p">(</span><span class="n">gc</span> <span class="o">*</span><span class="n">fakeGreeterClient</span><span class="p">)</span> <span class="n">SayHello</span><span class="p">(</span><span class="n">ctx</span> <span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="n">in</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="n">opts</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">greeter</span><span class="o">.</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
-    <span class="k">if</span> <span class="n">gc</span><span class="o">.</span><span class="n">sayHelloFn</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="k">return</span> <span class="n">gc</span><span class="o">.</span><span class="n">sayHelloFn</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">in</span><span class="p">,</span> <span class="n">opts</span><span class="o">...</span><span class="p">)</span>
-    <span class="p">}</span>
-    <span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="n">errors</span><span class="o">.</span><span class="n">New</span><span class="p">(</span><span class="s">"fakeGreeterClient was not set up with a response - must set gc.sayHelloFn"</span><span class="p">)</span>
-<span class="p">}</span>
-
-<span class="k">func</span> <span class="n">TestSomeService</span><span class="p">(</span><span class="n">t</span> <span class="o">*</span><span class="n">testing</span><span class="o">.</span><span class="n">T</span><span class="p">)</span> <span class="p">{</span>
-    <span class="k">var</span> <span class="n">requests</span> <span class="p">[]</span><span class="o">*</span><span class="n">greeter</span><span class="o">.</span><span class="n">HelloReply</span>
-    <span class="n">gc</span> <span class="o">:=</span> <span class="o">&amp;</span><span class="n">fakeGreeterClient</span><span class="p">{}</span>
-    <span class="c">// Set up the fake greeter to return a canned message.</span>
-    <span class="n">gc</span><span class="o">.</span><span class="n">sayHelloFn</span> <span class="o">=</span> <span class="k">func</span><span class="p">(</span><span class="n">ctx</span> <span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="n">in</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="n">opts</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
-        <span class="n">requests</span> <span class="o">=</span> <span class="nb">append</span><span class="p">(</span><span class="n">requests</span><span class="p">,</span> <span class="n">in</span><span class="p">)</span> <span class="c">// Record requests.</span>
-        <span class="k">return</span> <span class="o">&amp;</span><span class="n">greeter</span><span class="o">.</span><span class="n">HelloReply</span><span class="p">{</span><span class="n">Message</span><span class="o">:</span> <span class="s">"hello world"</span><span class="p">},</span> <span class="no">nil</span>
-    <span class="p">}</span>
-    <span class="n">serv</span> <span class="o">:=</span> <span class="n">NewSomeService</span><span class="p">(</span><span class="n">gc</span><span class="p">)</span>
-    <span class="n">_</span> <span class="o">=</span> <span class="n">serv</span> <span class="c">// Test serv.</span>
-    <span class="n">_</span> <span class="o">=</span> <span class="n">requests</span> <span class="c">// Assert on expected requests.</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>Simple! And, of course, <code class="language-plaintext highlighter-rouge">fakeGreeterClient</code> can be more or less complicated:
-perhaps it always returns the same thing (less complicated), or perhaps it tries
-to mimic the behavior of the real <code class="language-plaintext highlighter-rouge">Greeter</code> (more complicated).</p>
-
-<h1 id="stubbing">Stubbing</h1>
-
-<p>Sometimes we aren’t able to use dependency injection, but we <em>can</em> choose which
-connection we’re using. For example, this is the case with
-<a href="https://pkg.go.dev/cloud.google.com/go/pubsub">cloud.google.com/go/pubsub</a>,
-whose <a href="https://pkg.go.dev/cloud.google.com/go/pubsub#NewClient">NewClient</a> does
-not allow passing the underlying <a href="https://pkg.go.dev/google.golang.org/api/pubsub/v1">google.golang.org/api/pubsub/v1 raw proto-generated client interface</a> but <a href="https://pkg.go.dev/google.golang.org/api/option#WithGRPCConn"><em>does</em> allow passing in a conn</a>.</p>
-
-<p>Another example where passing a mock is not good enough, and you have to rely
-on some connection, is integration tests! For integration tests, you’d want your
-real binary to talk to a <code class="language-plaintext highlighter-rouge">Greeter</code> running locally, which you can
-stub/set up/view interactions in the test itself. You’ll want this stub
-<code class="language-plaintext highlighter-rouge">Greeter</code> to have some address like <code class="language-plaintext highlighter-rouge">localhost:12345</code> that you can pass to your
-binary through a flag, like <code class="language-plaintext highlighter-rouge">--greeterAddr=localhost:12345</code>.</p>
-
-<p>These are just two small examples, but this problem of needing stubbing
-capabilities beyond a simple interface mock comes up enough that it justifies
-its own section.</p>
-
-<p>It turns out to be very similar to the above mocking strategy, with a few small
-differences. Let’s dive in! We’ll use the second example - the integration test -
-though the principles apply equally to any opaque gRPC client situation.</p>
-
-<p>So, here’s our main from before, but we’re going to make it callable from our
-test by sticking it in a non-main package:</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">package</span> <span class="n">main</span>
-
-<span class="k">var</span> <span class="n">greeterAddr</span> <span class="o">=</span> <span class="n">flag</span><span class="o">.</span><span class="n">String</span><span class="p">(</span><span class="s">"greeterAddr"</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="s">"--greeterAddr=greeter:12345"</span><span class="p">)</span>
-
-<span class="k">func</span> <span class="n">main</span><span class="p">()</span> <span class="p">{</span>
-    <span class="n">flag</span><span class="o">.</span><span class="n">Parse</span><span class="p">()</span>
-    <span class="n">myapp</span><span class="o">.</span><span class="n">Start</span><span class="p">(</span><span class="o">*</span><span class="n">greeterAddr</span><span class="p">)</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">package</span> <span class="n">myapp</span>
-
-<span class="c">// Start starts the app. It is like main, but tests can call it.</span>
-<span class="k">func</span> <span class="n">Start</span><span class="p">(</span><span class="n">greeterAddr</span> <span class="kt">string</span><span class="p">)</span> <span class="p">{</span>
-    <span class="n">conn</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">grpc</span><span class="o">.</span><span class="n">Dial</span><span class="p">(</span><span class="n">greeterAddr</span><span class="p">)</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="c">// Handle err.</span>
-    <span class="p">}</span>
-    <span class="k">defer</span> <span class="n">conn</span><span class="o">.</span><span class="n">Close</span><span class="p">()</span>
-    <span class="n">gc</span> <span class="o">:=</span> <span class="n">greeter</span><span class="o">.</span><span class="n">NewGreeterClient</span><span class="p">(</span><span class="n">conn</span><span class="p">)</span>
-    <span class="n">serv</span> <span class="o">:=</span> <span class="n">someservice</span><span class="o">.</span><span class="n">NewSomeService</span><span class="p">(</span><span class="n">gc</span><span class="p">)</span>
-    <span class="n">_</span> <span class="o">=</span> <span class="n">serv</span> <span class="c">// Use SomeService with real GreeterClient.</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>This is one of <em>many</em> ways to start an integration. It allows us to run <code class="language-plaintext highlighter-rouge">main</code>
-from our test, since <code class="language-plaintext highlighter-rouge">main</code> itself is unexported and not run-able from a test.</p>
-
-<p>Sidenote: this method may seem hacky, but why? It’s just sticking your main into
-another, callable method. It’s used by large projects <a href="https://github.com/etcd-io/etcd/blob/00e49d0c10bb931f596d801d7368b5e0ae539fbd/main.go">like etcd</a> if you need further assurance. 🙂</p>
-
-<p>There are other ways to test main. For example, you might spin up the binary by
-executing shell using os.Cmd and the like. That’s fine! The same principles
-apply.</p>
-
-<p>Anyways, we have a way to run <code class="language-plaintext highlighter-rouge">main</code> - how do we get <code class="language-plaintext highlighter-rouge">main</code> to talk to our stub?
-We clearly can’t pass in a <code class="language-plaintext highlighter-rouge">GreeterClient</code> interface. So, instead, we’ll spin up
-<code class="language-plaintext highlighter-rouge">Greeter</code> as an in-memory server, and pass the in-memory server address to
-<code class="language-plaintext highlighter-rouge">Start</code>.</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">import</span> <span class="s">"net"</span>
-<span class="k">import</span> <span class="s">"google.golang.org/grpc"</span>
-
-<span class="k">type</span> <span class="n">FakeGreeterClient</span> <span class="k">struct</span> <span class="p">{</span>
-    <span class="n">sayHelloFn</span> <span class="k">func</span><span class="p">(</span><span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span>
-<span class="p">}</span>
-
-<span class="k">func</span> <span class="p">(</span><span class="n">gc</span> <span class="o">*</span><span class="n">FakeGreeterClient</span><span class="p">)</span> <span class="n">SayHello</span><span class="p">(</span><span class="n">ctx</span> <span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="n">in</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="n">opts</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">greeter</span><span class="o">.</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
-    <span class="k">if</span> <span class="n">gc</span><span class="o">.</span><span class="n">sayHelloFn</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="k">return</span> <span class="n">gc</span><span class="o">.</span><span class="n">sayHelloFn</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">in</span><span class="p">,</span> <span class="n">opts</span><span class="o">...</span><span class="p">)</span>
-    <span class="p">}</span>
-    <span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="n">errors</span><span class="o">.</span><span class="n">New</span><span class="p">(</span><span class="s">"fakeGreeterClient was not set up with a response - must set gc.sayHelloFn"</span><span class="p">)</span>
-<span class="p">}</span>
-
-<span class="k">func</span> <span class="n">TestIntegration</span><span class="p">(</span><span class="n">t</span> <span class="o">*</span><span class="n">testing</span><span class="o">.</span><span class="n">T</span><span class="p">)</span> <span class="p">{</span>
-    <span class="n">ctx</span> <span class="o">:=</span> <span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">()</span>
-
-    <span class="c">// Start FakeGreeterClient in an in-memory process.</span>
-    <span class="n">gc</span> <span class="o">:=</span> <span class="o">&amp;</span><span class="n">FakeGreeterClient</span><span class="p">{}</span>
-    <span class="n">l</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">net</span><span class="o">.</span><span class="n">Listen</span><span class="p">(</span><span class="s">"tcp"</span><span class="p">,</span> <span class="s">"localhost:0"</span><span class="p">)</span> <span class="c">// IIRC 0 == "first available port"</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="n">t</span><span class="o">.</span><span class="n">Fatal</span><span class="p">(</span><span class="n">err</span><span class="p">)</span>
-    <span class="p">}</span>
-    <span class="n">gsrv</span> <span class="o">:=</span> <span class="n">grpc</span><span class="o">.</span><span class="n">NewServer</span><span class="p">(</span><span class="n">opts</span><span class="o">...</span><span class="p">)</span>
-    <span class="n">greeter</span><span class="o">.</span><span class="n">RegisterGreeterServer</span><span class="p">(</span><span class="n">gsrv</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">gc</span><span class="p">)</span>
-    <span class="n">fakeGreeterAddr</span> <span class="o">:=</span> <span class="n">l</span><span class="o">.</span><span class="n">Addr</span><span class="p">()</span><span class="o">.</span><span class="n">String</span><span class="p">()</span>
-    <span class="k">go</span> <span class="k">func</span><span class="p">()</span> <span class="p">{</span>
-        <span class="k">if</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">gsrv</span><span class="o">.</span><span class="n">Serve</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">l</span><span class="p">);</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-            <span class="nb">panic</span><span class="p">(</span><span class="n">err</span><span class="p">)</span> <span class="c">// We're in a goroutine - we can't t.Fatal/t.Error.</span>
-        <span class="p">}</span>
-    <span class="p">}()</span>
-
-    <span class="n">myapp</span><span class="o">.</span><span class="n">Start</span><span class="p">(</span><span class="n">fakeGreeterAddr</span><span class="p">)</span>
-    <span class="c">// Test your app, which is now hooked up to FakeGreeterClient!</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>Ta-da! Very easy to start an in-memory gRPC fake.</p>
-
-<h1 id="bonus-actually-testing-main-forreal">Bonus: actually testing main, forreal</h1>
-
-<p>Ok, the above might be a bit arcane if you have the usual HTTP/gRPC API. You’re
-now able to hook your app up to the fake in-memory server, but how do you
-actually get your test to talk to <em>your</em> app?</p>
-
-<p>However you want! But, we’ll walk through one example.</p>
-
-<p>Imagine our app has some HTTP endpoints, and we want to send requests to them
-from our test, and see that our app appropriately talks to <code class="language-plaintext highlighter-rouge">Greeter</code> when those
-endpoints get hit. Well, in order to do that we need an address that our test
-can send requests to. Let’s make that happen!</p>
-
-<p>Let’s look at <code class="language-plaintext highlighter-rouge">main</code> and <code class="language-plaintext highlighter-rouge">Start</code> again:</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">package</span> <span class="n">main</span>
-
-<span class="k">var</span> <span class="n">port</span> <span class="o">=</span> <span class="n">flag</span><span class="o">.</span><span class="n">Int</span><span class="p">(</span><span class="s">"port"</span><span class="p">,</span> <span class="m">8080</span><span class="p">,</span> <span class="s">"the port this app will run on, ex --port=8080"</span><span class="p">)</span>
-<span class="k">var</span> <span class="n">greeterAddr</span> <span class="o">=</span> <span class="n">flag</span><span class="o">.</span><span class="n">String</span><span class="p">(</span><span class="s">"greeterAddr"</span><span class="p">,</span> <span class="s">""</span><span class="p">,</span> <span class="s">"--greeterAddr=greeter:12345"</span><span class="p">)</span>
-
-<span class="k">func</span> <span class="n">main</span><span class="p">()</span> <span class="p">{</span>
-    <span class="n">flag</span><span class="o">.</span><span class="n">Parse</span><span class="p">()</span>
-
-    <span class="c">// When user kills this process, close the server.</span>
-    <span class="k">defer</span> <span class="n">myapp</span><span class="o">.</span><span class="n">Start</span><span class="p">(</span><span class="o">*</span><span class="n">port</span><span class="p">,</span> <span class="o">*</span><span class="n">greeterAddr</span><span class="p">)</span><span class="o">.</span><span class="n">Close</span><span class="p">()</span>
-
-    <span class="c">// Wait forever, until a user kills this process.</span>
-    <span class="n">wg</span> <span class="o">:=</span> <span class="o">&amp;</span><span class="n">sync</span><span class="o">.</span><span class="n">WaitGroup</span><span class="p">{}</span>
-    <span class="n">wg</span><span class="o">.</span><span class="n">Add</span><span class="p">(</span><span class="m">1</span><span class="p">)</span>
-    <span class="n">wg</span><span class="o">.</span><span class="n">Wait</span><span class="p">()</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">package</span> <span class="n">myapp</span>
-
-<span class="c">// Start starts the app. Call Shutdown on the returned Server when done.</span>
-<span class="k">func</span> <span class="n">Start</span><span class="p">(</span><span class="n">port</span> <span class="kt">int</span><span class="p">,</span> <span class="n">greeterAddr</span> <span class="kt">string</span><span class="p">)</span> <span class="o">*</span><span class="n">http</span><span class="o">.</span><span class="n">Server</span> <span class="p">{</span>
-    <span class="n">conn</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">grpc</span><span class="o">.</span><span class="n">Dial</span><span class="p">(</span><span class="n">greeterAddr</span><span class="p">)</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="c">// Handle err.</span>
-    <span class="p">}</span>
-    <span class="k">defer</span> <span class="n">conn</span><span class="o">.</span><span class="n">Close</span><span class="p">()</span>
-    <span class="n">gc</span> <span class="o">:=</span> <span class="n">greeter</span><span class="o">.</span><span class="n">NewGreeterClient</span><span class="p">(</span><span class="n">conn</span><span class="p">)</span>
-    <span class="n">serv</span> <span class="o">:=</span> <span class="n">someservice</span><span class="o">.</span><span class="n">NewSomeService</span><span class="p">(</span><span class="n">gc</span><span class="p">)</span>
-    <span class="n">_</span> <span class="o">=</span> <span class="n">serv</span> <span class="c">// Use SomeService with real GreeterClient.</span>
-
-    <span class="n">http</span><span class="o">.</span><span class="n">HandleFunc</span><span class="p">(</span><span class="s">"/sayhello"</span><span class="p">,</span> <span class="k">func</span><span class="p">(</span><span class="n">w</span> <span class="n">http</span><span class="o">.</span><span class="n">ResponseWriter</span><span class="p">,</span> <span class="n">r</span> <span class="o">*</span><span class="n">http</span><span class="o">.</span><span class="n">Request</span><span class="p">)</span> <span class="p">{</span>
-        <span class="k">if</span> <span class="n">_</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">serv</span><span class="o">.</span><span class="n">SayHello</span><span class="p">(</span><span class="n">context</span><span class="o">.</span><span class="n">Background</span><span class="p">(),</span> <span class="o">&amp;</span><span class="n">greeter</span><span class="o">.</span><span class="n">HelloRequest</span><span class="p">{</span><span class="n">Name</span><span class="o">:</span> <span class="s">"world"</span><span class="p">});</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-            <span class="n">http</span><span class="o">.</span><span class="n">Error</span><span class="p">(</span><span class="n">w</span><span class="p">,</span> <span class="n">err</span><span class="o">.</span><span class="n">String</span><span class="p">(),</span> <span class="m">500</span><span class="p">)</span>
-        <span class="p">}</span>
-    <span class="p">})</span>
-    
-    <span class="n">srv</span> <span class="o">:=</span> <span class="o">&amp;</span><span class="n">http</span><span class="o">.</span><span class="n">Server</span><span class="p">{</span><span class="n">Addr</span><span class="o">:</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Sprintf</span><span class="p">(</span><span class="s">":%d"</span><span class="p">,</span> <span class="n">port</span><span class="p">)}</span>
-    <span class="k">go</span> <span class="k">func</span><span class="p">()</span> <span class="p">{</span>
-        <span class="k">if</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">srv</span><span class="o">.</span><span class="n">ListenAndServe</span><span class="p">();</span> <span class="n">err</span> <span class="o">!=</span> <span class="n">http</span><span class="o">.</span><span class="n">ErrServerClosed</span> <span class="p">{</span>
-            <span class="n">log</span><span class="o">.</span><span class="n">Fatal</span><span class="p">(</span><span class="n">err</span><span class="p">)</span>
-        <span class="p">}</span>
-    <span class="p">}()</span>
-    <span class="k">return</span> <span class="n">srv</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<p>Mostly the same, except we now have an HTTP API. This is just an example - a
-gRPC server would look similar.</p>
-
-<p>Onto the integration test!</p>
-
-<div class="language-go highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">import</span> <span class="s">"net"</span>
-<span class="k">import</span> <span class="s">"google.golang.org/grpc"</span>
-
-<span class="k">type</span> <span class="n">FakeGreeterClient</span> <span class="k">struct</span> <span class="p">{</span>
-    <span class="n">sayHelloFn</span> <span class="k">func</span><span class="p">(</span><span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span>
-<span class="p">}</span>
-
-<span class="k">func</span> <span class="p">(</span><span class="n">gc</span> <span class="o">*</span><span class="n">FakeGreeterClient</span><span class="p">)</span> <span class="n">SayHello</span><span class="p">(</span><span class="n">ctx</span> <span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">,</span> <span class="n">in</span> <span class="o">*</span><span class="n">HelloRequest</span><span class="p">,</span> <span class="n">opts</span> <span class="o">...</span><span class="n">grpc</span><span class="o">.</span><span class="n">CallOption</span><span class="p">)</span> <span class="p">(</span><span class="o">*</span><span class="n">greeter</span><span class="o">.</span><span class="n">HelloReply</span><span class="p">,</span> <span class="kt">error</span><span class="p">)</span> <span class="p">{</span>
-    <span class="k">if</span> <span class="n">gc</span><span class="o">.</span><span class="n">sayHelloFn</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="k">return</span> <span class="n">gc</span><span class="o">.</span><span class="n">sayHelloFn</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">in</span><span class="p">,</span> <span class="n">opts</span><span class="o">...</span><span class="p">)</span>
-    <span class="p">}</span>
-    <span class="k">return</span> <span class="no">nil</span><span class="p">,</span> <span class="n">errors</span><span class="o">.</span><span class="n">New</span><span class="p">(</span><span class="s">"fakeGreeterClient was not set up with a response - must set gc.sayHelloFn"</span><span class="p">)</span>
-<span class="p">}</span>
-
-<span class="k">func</span> <span class="n">TestIntegration</span><span class="p">(</span><span class="n">t</span> <span class="o">*</span><span class="n">testing</span><span class="o">.</span><span class="n">T</span><span class="p">)</span> <span class="p">{</span>
-    <span class="n">ctx</span> <span class="o">:=</span> <span class="n">context</span><span class="o">.</span><span class="n">Context</span><span class="p">()</span>
-
-    <span class="c">// Start FakeGreeterClient in an in-memory process.</span>
-    <span class="n">gc</span> <span class="o">:=</span> <span class="o">&amp;</span><span class="n">FakeGreeterClient</span><span class="p">{}</span>
-    <span class="n">l</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">net</span><span class="o">.</span><span class="n">Listen</span><span class="p">(</span><span class="s">"tcp"</span><span class="p">,</span> <span class="s">"localhost:0"</span><span class="p">)</span> <span class="c">// IIRC 0 == "first available port"</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="n">t</span><span class="o">.</span><span class="n">Fatal</span><span class="p">(</span><span class="n">err</span><span class="p">)</span>
-    <span class="p">}</span>
-    <span class="n">gsrv</span> <span class="o">:=</span> <span class="n">grpc</span><span class="o">.</span><span class="n">NewServer</span><span class="p">(</span><span class="n">opts</span><span class="o">...</span><span class="p">)</span>
-    <span class="n">greeter</span><span class="o">.</span><span class="n">RegisterGreeterServer</span><span class="p">(</span><span class="n">gsrv</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">gc</span><span class="p">)</span>
-    <span class="n">fakeGreeterAddr</span> <span class="o">:=</span> <span class="n">l</span><span class="o">.</span><span class="n">Addr</span><span class="p">()</span><span class="o">.</span><span class="n">String</span><span class="p">()</span>
-    <span class="k">go</span> <span class="k">func</span><span class="p">()</span> <span class="p">{</span>
-        <span class="k">if</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">gsrv</span><span class="o">.</span><span class="n">Serve</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">l</span><span class="p">);</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-            <span class="nb">panic</span><span class="p">(</span><span class="n">err</span><span class="p">)</span> <span class="c">// We're in a goroutine - we can't t.Fatal/t.Error.</span>
-        <span class="p">}</span>
-    <span class="p">}()</span>
-
-    <span class="n">myappPort</span> <span class="o">:=</span> <span class="n">openPort</span><span class="p">()</span>
-    <span class="n">myappAddr</span> <span class="o">:=</span> <span class="n">fmt</span><span class="o">.</span><span class="n">Sprintf</span><span class="p">(</span><span class="s">"localhost:%d"</span><span class="p">,</span> <span class="n">myappPort</span><span class="p">)</span>
-
-    <span class="n">srv</span> <span class="o">:=</span> <span class="n">myapp</span><span class="o">.</span><span class="n">Start</span><span class="p">(</span><span class="n">myappPort</span><span class="p">,</span> <span class="n">fakeGreeterAddr</span><span class="p">)</span>
-    <span class="k">defer</span> <span class="n">srv</span><span class="o">.</span><span class="n">Close</span><span class="p">()</span>
-    
-    <span class="c">// Test your app, which is now hooked up to FakeGreeterClient, by sending</span>
-    <span class="c">// requests to myappAddr!</span>
-<span class="p">}</span>
-
-<span class="c">// openPort returns an open port.</span>
-<span class="k">func</span> <span class="n">openPort</span><span class="p">(</span><span class="n">t</span> <span class="o">*</span><span class="n">testing</span><span class="o">.</span><span class="n">T</span><span class="p">)</span> <span class="kt">int</span> <span class="p">{</span>
-    <span class="n">t</span><span class="o">.</span><span class="n">Helper</span><span class="p">()</span>
-    <span class="n">l</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">net</span><span class="o">.</span><span class="n">Listen</span><span class="p">(</span><span class="s">"tcp"</span><span class="p">,</span> <span class="s">":0"</span><span class="p">)</span>
-    <span class="k">defer</span> <span class="n">l</span><span class="o">.</span><span class="n">Close</span><span class="p">()</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="n">t</span><span class="o">.</span><span class="n">Fatal</span><span class="p">(</span><span class="n">err</span><span class="p">)</span>
-    <span class="p">}</span>
-
-    <span class="n">u</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">url</span><span class="o">.</span><span class="n">Parse</span><span class="p">(</span><span class="n">l</span><span class="o">.</span><span class="n">Addr</span><span class="p">())</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="n">t</span><span class="o">.</span><span class="n">Fatal</span><span class="p">(</span><span class="n">err</span><span class="p">)</span>
-    <span class="p">}</span>
-    <span class="k">if</span> <span class="n">u</span><span class="o">.</span><span class="n">Port</span><span class="p">()</span> <span class="o">==</span> <span class="s">""</span> <span class="p">{</span>
-        <span class="n">t</span><span class="o">.</span><span class="n">Fatalf</span><span class="p">(</span><span class="s">"unable to parse a port from %s"</span><span class="p">,</span> <span class="n">l</span><span class="o">.</span><span class="n">Addr</span><span class="p">())</span>
-    <span class="p">}</span>
-
-    <span class="n">p</span><span class="p">,</span> <span class="n">err</span> <span class="o">:=</span> <span class="n">strconv</span><span class="o">.</span><span class="n">Atoi</span><span class="p">(</span><span class="n">u</span><span class="o">.</span><span class="n">Port</span><span class="p">())</span>
-    <span class="k">if</span> <span class="n">err</span> <span class="o">!=</span> <span class="no">nil</span> <span class="p">{</span>
-        <span class="n">t</span><span class="o">.</span><span class="n">Fatal</span><span class="p">(</span><span class="n">err</span><span class="p">)</span>
-    <span class="p">}</span>
-    <span class="k">return</span> <span class="n">p</span>
-<span class="p">}</span>
-</code></pre></div></div>
-
-<h1 id="conclusion">Conclusion</h1>
-
-<p>Stubbing and mocking gRPC servers in Go is very easy, doesn’t require any
-libraries, and obviates the need for pre-provided fakes/mocks/emulators/etc.</p>]]></content><author><name></name></author><summary type="html"><![CDATA[Introduction]]></summary></entry></feed>
+<p>I had hoped that I would be able to stick on the technical path through my whole career, growing and reaching new levels without having to dip into management. After 4 years at Google, 10 years working professionally, and 16 years programming, I’m very pleased to say that I still have that hope, am still enjoying learning, and doing so voraciously, and am still finding new levels of technical depth. I am overwhelmingly optimistic about continuing on this path. 🙂</p>]]></content><author><name></name></author><summary type="html"><![CDATA[Reflecting on 4 years at Google]]></summary></entry><entry><title type="html">Contexts and Structs</title><link href="http://localhost:4000/2021/02/24/contexts-structs.html" rel="alternate" type="text/html" title="Contexts and Structs" /><published>2021-02-24T14:55:23-07:00</published><updated>2021-02-24T14:55:23-07:00</updated><id>http://localhost:4000/2021/02/24/contexts-structs</id><content type="html" xml:base="http://localhost:4000/2021/02/24/contexts-structs.html"><![CDATA[<p>Posted at <a href="https://go.dev/blog/context-and-structs">go.dev/blog/context-and-structs</a>.</p>]]></content><author><name></name></author><summary type="html"><![CDATA[Posted at go.dev/blog/context-and-structs.]]></summary></entry></feed>
